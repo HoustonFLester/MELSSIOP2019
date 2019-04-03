@@ -1,0 +1,356 @@
+---
+title: "LMX Example"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+I would do the package installation outside of the R markdown file. Running this document will take while, because it estimates all LMX relevant models that were discussed in the manuscript. We recommend looking at the pdf corresponding to this document (LMX_Example.pdf). Also, you will need to have Rstan installed (see RstanInstallation.R instructions). This Rmarkdown file was provided to illustrate how the pdf was made and to provide an illustation of the information that R/brms/stan calculates for you. 
+
+```{r Setup}
+  ## Install packages
+      # install.packages("brms")
+      # install.packages("mvtnorm")
+      # install.packages("lme4")
+      # install.packages("devtools")
+      # install.packages("ggplot2")
+      # install.packages("processx")
+      # install.packages("bayesplot")
+      # devtools::install_github("mvuorre/brmstools")
+
+
+  ## Loads the packages
+      library(brms)
+      library(mvtnorm)
+      library(lme4)
+      library(bayesplot)
+      library(ggplot2)
+      sessionInfo() #Presents version information 
+```
+
+There are additional comments inside the code if we felt that it would be beneficial to have the comment close to the code. The set.seed function makes the results reproducible. You should get the same total number of followers (1735), mean group size (6.94), min group size (3) and max group size (10). 
+```{r GenSetup1}
+# Cross-sectional data generation ----
+  ## Level 2 information - Allowing for unequal work group sizes
+set.seed(1919) 
+Lev2N <- 250
+with_sample_cross <- rbinom(n = Lev2N, prob = 0.7, size = 10)
+sum(with_sample_cross) ####Total number of people (followers)
+
+mean(with_sample_cross) #Mean sample size
+min(with_sample_cross)  #Minimum sample size
+max(with_sample_cross)  #Maximum smaple size
+
+### Creating a group id variable to correspond to the number of individuals on each team. 
+group_id <- rep(1:Lev2N, times = with_sample_cross)
+```
+
+In the next code chunk, we are setting up the data generating values for the location side of the model. All exogenous predictor variables were generated to have a total variance of one and are assumed to be uncorrelated with one another. This was done so the effect sizes (correlations) from the meta-analysis can be best incorporated into the simulation. Similarty (i.e., a Level 1 predictor) is generated to have 20% of its variability between groups and 80% of it within group. The correlation was converted into an r squared and it is assumed that the proportion of variability that similarity explains is the same at both levels (i.e., .5^2).Transformational leadership is assumed to explain an additional 53.29% of the variability in between group LMX. The cross-level interaction was specified in such a way that the effect for level-one similarity is 0 for those in a group with a highly transformational leader (score of 2 standard deviations above the mean). Overall Level 1 variability is 1. Overall between variability is .25 for an ICC of .25/(1.25) = .2. However, it is important to note that this ICC is for a group that is in a group with an average similarity, an individual with that particuar similarity value, and an average level of transformational leadership. In other words, when all predictor variables are zero, because there is also the scale side of the model. 
+```{r GenSetup2}
+similar_L1_var <- .8
+similar_L2_var <- .2
+trans_tot_var <- 1
+
+#Location intercept
+gamma_00 = 0
+
+#Location - simple main effect for similarity within-group effect
+#(value converted from meta-analysis)
+gamma_10 = sqrt(5)/4 
+
+#Location main effect for Level-two similarity (value converted from meta-analysis)
+gamma_01 = sqrt(5)/4                           
+
+#Location transformational leadership simple main effect
+gamma_02 = sqrt(.73^2/4) 
+
+#Location interaction term which is created to
+#"shut off" the similarity level one effect for
+#Those with high transformational leadership
+gamma_11 = -gamma_10/2                                                               
+
+#Explains 25% of the level 1 variance
+avg_res_L1var = 1 - gamma_10^2*similar_L1_var 
+
+#Explains 78.29% of random intercept variance
+res_RIvar = .25 - gamma_01^2*similar_L2_var -gamma_02^2*trans_tot_var 
+
+#Explains 62.5% of the random slope variance.
+res_RSvar = .125 - (-gamma_10/2)^2 
+```
+
+In this code chunk, we set up the scale side of the model. There is not much to go on as far as prior research regarding these data generating values. Thus, they were chosen to align with our hypothetical substantive scenario and to provide an unconditional ICC that is aligned with what is typically found in prior research (i.e., somewhere between .15 and .30, Mathieu, J. E., Aguinis, H., Culpepper, S. A., & Chen, 2012). 
+
+```{r GenSetup3}
+#Scale fixed intercept log(sqrt(avg_resid_VAR))
+tau_00 = log(sqrt(avg_res_L1var)) 
+
+#Scale - fixed Level-one similarity simple main effect 
+tau_10 = -.15
+
+#Scale main effect for Level-two similarity (value converted from meta-analysis)
+tau_01 = -.15 
+
+#Scale transformative leadership simple main effect
+tau_02 = -.10 
+
+#Scale interaction term which is created to "shut off" the similarity level one effect
+#for those with high transformational leadership 
+tau_11 = .075 
+          
+#Log residual variances
+res_RIvar_sigma <- .01
+res_RSvar_sigma <- .01
+
+#### Used to fill in the covariance matrix
+off_diag_b0_t0 <- -.3*sqrt(res_RIvar)*sqrt(res_RIvar_sigma)
+off_diag_b0_b1 <- -.3*sqrt(res_RIvar)*sqrt(res_RSvar)
+off_diag_t0_t1 <- -.3*sqrt(res_RIvar_sigma)*sqrt(res_RSvar_sigma)
+off_diag_t0_b1 <- .3*sqrt(res_RIvar_sigma)*sqrt(res_RSvar)
+off_diag_t1_b1 <- -.3*sqrt(res_RSvar_sigma)*sqrt(res_RSvar)
+off_diag_b0_t1 <- 0
+
+#### G matrix
+mus <- c(0, 0, 0, 0)
+sigma <- matrix(data = c(res_RIvar, off_diag_b0_t0 , off_diag_b0_t1, off_diag_b0_b1,
+                         off_diag_b0_t0, res_RIvar_sigma, off_diag_t0_t1, off_diag_t0_b1,
+                         off_diag_b0_t1, off_diag_t0_t1, res_RSvar_sigma, off_diag_t1_b1,
+                         off_diag_b0_b1, off_diag_t0_b1, off_diag_t1_b1, res_RSvar), 
+                nrow = 4, ncol = 4)
+
+G_corr <- cov2cor(sigma)
+colnames(G_corr) <- c("u0j", "v0j", "v1j", "u1j")
+row.names(G_corr) <- c("u0j", "v0j", "v1j", "u1j")
+```
+
+```{r GenData}
+# Generating Level-two data. 
+set.seed(5189)
+lev2_rans <- rmvnorm(n = Lev2N, mus, sigma) # u's and v's from equations 1 and 2
+trans <- rnorm(Lev2N,mean = 0,sd = 1) #Transformative leadership
+L2_similar <- rnorm(Lev2N,mean = 0,sd = sqrt(.2)) # Level 2 similarity uncentered
+
+### Accounting for unbalanced sample size. 
+trans_unbal <- rep(trans, with_sample_cross)
+
+# Transformative leadership grand mean centered. 
+trans_gmc <- trans - mean(trans_unbal)
+
+#Level two similarity unbalanced
+similar_L2_unbal <- rep(L2_similar, with_sample_cross)
+
+
+
+# Creating an empty list of lists to hold the generated data for each group
+data_holder_cross_list <-  rep( list(list()), Lev2N )
+# Using a for loop to generate the level-one data for each team and  
+#then bind all 250 groups of the data together
+      
+for (GroupID in 1:Lev2N){
+# Generate Standard Normal Variates with Specified Correlation
+
+  u0j <- lev2_rans[GroupID, 1]
+  v0j <- lev2_rans[GroupID, 2]
+  v1j <- lev2_rans[GroupID, 3]
+  u1j <- lev2_rans[GroupID, 4]
+
+# Creating the level one similarity variable with the specified correlation.
+  similar <- L2_similar[GroupID] + rnorm(n = with_sample_cross[GroupID],mean = 0,   
+                                         sd = sqrt(.8))
+  IndID <- 1:with_sample_cross[GroupID]
+   # Similar level 1 group mean centered
+   similar_l1_grmc <- similar - L2_similar[GroupID]
+   #-# or 
+   # similar_l1_grmc <- similar - mean(similar)
+   
+   
+   log_sigma_ij = (tau_00 + v0j) + tau_01*L2_similar[GroupID] +    
+                 tau_02*trans_gmc[GroupID] +   
+                 (tau_10 + tau_11*trans_gmc[GroupID] + v1j)*similar_l1_grmc
+   sigma_ij = exp(log_sigma_ij)
+   e_ij = rnorm(with_sample_cross[GroupID],mean = 0,sd = sigma_ij)
+   # Create Outcome Variable
+   Y = (gamma_00 + u0j) + gamma_01*L2_similar[GroupID] +    
+        gamma_02*trans_gmc[GroupID] + 
+       (gamma_10 + gamma_11*trans_gmc[GroupID] + u1j)*similar_l1_grmc + e_ij
+   
+   data_holder_cross_list[[GroupID]] =   
+     data.frame(GroupID, IndID, group_size = with_sample_cross[GroupID], 
+                transform_grandmc = trans_gmc[GroupID], similar, 
+                similarL1_groupmc = similar_l1_grmc, 
+                similarL2 = L2_similar[GroupID],
+                tau_00, v0j, tau_01, tau_10, tau_11, v1j,
+                gamma_00, u0j, gamma_01, gamma_10, 
+                gamma_11, u1j,LMX = Y, sigma_ij, e_ij)
+      }
+
+# Binding all 250 groups of the data together
+  data_holder_cross_centered <- do.call(rbind, data_holder_cross_list)
+  data_holder_cross_centered <- as.data.frame(data_holder_cross_centered) 
+  
+#Centering the tranformational leadership variable at two   
+#standard deviations above the mean to get the effect of    
+#of similiarity specifically for very high transformational leaders. 
+  
+
+data_holder_cross_centered$transform_c2 <-    
+    data_holder_cross_centered$transform_grandmc - 2
+
+```
+
+The data are now generated. The name of the final dataset is in the data_holder_cross_centered data frame. Estimating the models occurs below this point. The models estimated in this manuscript utilize the default priors in brms (see Burkner, 2017); they are described in the manuscript. We also demonstrate how the prior could be changed if so desired. 
+
+This document demonstrates several different versions of the mixed-effects location-scale model that could be estimated for the cross-sectional LMX example. We recommend using the "eval = FALSE" option for some code chunks (see the OtherModels section), because these models can take some time to estimate. Also, within a chunk any model can be commented out by using a hashtag. The version of this file posted online commented out the alternative prior specification for the full model. The first chunk labeled "EstManuscriptmodels" short for estimating the manuscript models contains an unconditional random intercept model to obtain the estimated ICC using the lme4 (Bates et al. 2014) package. Restricted maximum likelihood estimation was used to obtain the estimates. This was done to confirm that our data generation has some correspondence with multilevel data typically found in the organizational sciences (i.e., somewhere between .15 and .30, Mathieu, J. E., Aguinis, H., Culpepper, S. A., & Chen, 2012). That was the case, the ICC was approximately .2036 = 0.3066/(0.3066 + 1.199).  The second model estimated in this chunk is the full model that corresponds to the data generation. This is the model that was discussed at length in the illustrative examples portion of the manuscript. The next model provided in the chunk, is the same model with a different prior. It is currently commented out; remove the hashtag and that model can be estimated. The final model that is included in this chunk was estimated to center the transformational leadership variable at two standard deviations above the mean which allows us to interpret the simple main effect of relative similarity (level-one) for groups with leaders that are mucher higher than the mean. These results were mentioned in the manuscript.   
+
+
+
+```{r EstManuscriptmodels, eval = T}
+
+# Estimating Models of Interest 
+# Unconditional ICC
+unc_ICC <- lmer(LMX  ~ 1 + (1 | GroupID), data = data_holder_cross_centered) 
+summary(unc_ICC) 
+
+# Full Model that matches the data generation model
+cross_LMX_full <-
+bf(LMX ~ 1  + similarL1_groupmc + similarL2 + transform_grandmc +
+          similarL1_groupmc:transform_grandmc + (1 + similarL1_groupmc|ID1|GroupID),
+  sigma ~ 1 + similarL1_groupmc + similarL2 + transform_grandmc +
+          similarL1_groupmc:transform_grandmc + (1 + similarL1_groupmc|ID1|GroupID))
+
+#Estimating the model with brms
+ cross_LMX_full_out <- brm(cross_LMX_full,
+   data = data_holder_cross_centered, chains = 4, cores = 4, iter = 5000,
+   control = list(adapt_delta = .85, max_treedepth = 15), seed = 1848, save_all_pars = T)
+
+summary(cross_LMX_full_out)
+
+# Full Model that matches the data generation model with an informative prior 
+# informative <- c(prior(normal(0, 1), class = "b"), 
+                 # prior(normal(0, 1), class = "b", dpar = "sigma"),
+                 # prior(lkj(10), class = "cor"))
+
+#No need to redefine the same equation.
+
+# cross_def_full_info_out <- brm(cross_LMX_full, data = data_holder_cross_centered, 
+                               # chains = 4, cores = 4, iter = 5000,
+                              # control = list(adapt_delta = .85, max_treedepth = 15), 
+                              # prior = informative,
+                              # seed = 14, save_all_pars = T)
+# summary(cross_def_full_info_out)
+
+
+#Transformative leadership centered at two    
+#standard deviations above the mean
+
+cross_LMX_full_transc2 <-
+bf(LMX ~ 1  + similarL1_groupmc + similarL2 + transform_c2 +
+          similarL1_groupmc:transform_c2 + (1 + similarL1_groupmc|ID1|GroupID),
+  sigma ~ 1 + similarL1_groupmc + similarL2 + transform_c2 +
+          similarL1_groupmc:transform_c2 + (1 + similarL1_groupmc|ID1|GroupID))
+
+#Estimating the model with brms
+ cross_LMX_full_transc2_out <- brm(cross_LMX_full_transc2,
+   data = data_holder_cross_centered, chains = 4, cores = 4, iter = 5000,
+   control = list(adapt_delta = .85, max_treedepth = 15), seed = 1954, save_all_pars = T)
+
+summary(cross_LMX_full_transc2_out)
+
+```
+
+This section is presented to demonstrate how the mixed-effect location-scale model is similar to yet distinct from traditional multilevel models. The models are presented in a build up fashion from simplest (i.e., the least number of parameters estimated) to the most complex (i.e., the most number of parameters estimated). Model comparison is also performed in this section. These models are described in detail in the manuscript. Frequentist versions of these models are presented until scale random effects are added to the model.  
+```{r OtherModels, eval = T}
+#Equivalent to an empty linear regression model with no predictors. 
+empty_mod <- bf(LMX ~ 1 ,
+                    sigma ~ 1 )
+
+empty_mod_out <- brm(empty_mod, data = data_holder_cross_centered, chains = 4, 
+                     cores = 4, iter = 5000, control = list(adapt_delta = .85,    
+                                                            max_treedepth = 15),   
+                     seed = 8154, save_all_pars = T)
+print(summary(empty_mod_out), digits = 4)
+
+#Matching results presented from R's general linear model function
+empty_mod_freq <- lm(LMX ~ 1, data = data_holder_cross_centered)
+summary(empty_mod_freq)
+
+#Random intercept on the location side
+random_int <- bf(LMX ~ 1 + (1 | GroupID),
+                    sigma ~ 1 )
+    
+
+random_int_out <- brm(random_int, data = data_holder_cross_centered,   
+                      chains = 4, cores = 4, iter = 5000,   
+                      control = list(adapt_delta = .85, max_treedepth = 15),   
+                      seed = 186, save_all_pars = T)
+
+summary(random_int_out)
+
+#Random Intercept frequentist version - REML estimation 
+#This model was the first one estimated in the EstManuscriptmodels chunk. 
+unc_ICC <- lmer(LMX  ~ 1 + (1 | GroupID), data = data_holder_cross_centered) 
+summary(unc_ICC)
+
+# Random Intercept for location and scale
+# From now on only the Bayesian approach will be estimated.
+# The extra ID1 variable is a generic variable that is   
+# needed to accomodate random intercepts on the scale side
+random_ints_loc_scale <- bf(LMX ~ 1   + (1 |ID1|GroupID),
+                          sigma ~ 1 +  (1 |ID1|GroupID))
+    
+random_ints_loc_scale_out <- brm(random_ints_loc_scale,   
+                                 data = data_holder_cross_centered, 
+                                 chains = 4, cores = 4, iter = 5000,
+                                 control = list(adapt_delta = .85, 
+                                                max_treedepth = 15), 
+                                 seed = 4789, save_all_pars = T)
+#Random slope for location and random intercept for scale 
+
+randomSlopeLoc_RIscale <- bf(LMX ~ 1 + similarL1_groupmc +   
+                                (1 + similarL1_groupmc|ID1|GroupID),
+                                sigma ~ 1 +  (1 |ID1|GroupID))
+    
+randomSlopeLoc_RIscale_out <- brm(randomSlopeLoc_RIscale, 
+                                  data = data_holder_cross_centered, 
+                                  chains = 4, cores = 4, iter = 5000,
+                                  control = list(adapt_delta = .85, 
+                                                    max_treedepth = 15), 
+                                  seed = 4, save_all_pars = T)
+
+summary(randomSlopeLoc_RIscale_out)
+
+# Random slopes on both sides 
+randomSlope_both <- bf(LMX ~ 1  + similarL1_groupmc +   
+                         (1 + similarL1_groupmc|ID1|GroupID),
+                         sigma ~ 1 + similarL1_groupmc +   
+                         (1 + similarL1_groupmc|ID1|GroupID))
+    
+# Estimating the model with brms
+randomSlope_both_out <- brm(randomSlope_both, data = data_holder_cross_centered, 
+                            chains = 4, cores = 4, iter = 5000,   
+                            control = list(adapt_delta = .85, max_treedepth = 15), 
+                            seed = 8712, save_all_pars = T)
+# Full Model that matches the data generation model
+cross_LMX_full <-
+bf(LMX ~ 1  + similarL1_groupmc + similarL2 + transform_grandmc +   
+          similarL1_groupmc:transform_grandmc +   
+          (1 + similarL1_groupmc|ID1|GroupID),
+  sigma ~ 1 + similarL1_groupmc + similarL2 + transform_grandmc +
+          similarL1_groupmc:transform_grandmc +    
+          (1 + similarL1_groupmc|ID1|GroupID))
+
+#Estimating the model with brms
+cross_LMX_full_out <- brm(cross_LMX_full,
+   data = data_holder_cross_centered, chains = 4, cores = 4, iter = 5000,
+   control = list(adapt_delta = .85, max_treedepth = 15),   
+   seed = 1848, save_all_pars = T)
+
+summary(cross_LMX_full_out)
+
+```
+
+
